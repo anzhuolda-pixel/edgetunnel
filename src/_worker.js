@@ -12,7 +12,6 @@ let userID = "ffffffff-ffff-4fff-8fff-ffffffffffff";
 //const proxys = ["cdn-b100.xn--b6gac.eu.org"]
 // Anycast/cloudflare.com
 const domains = [
-  "5ch.net",
   "acm.org",
   "activehosted.com",
   "ahrefs.com",
@@ -52,8 +51,6 @@ const domains = [
   "shopify.com",
   "slickdeals.net",
   "smallseotools.com",
-  "stackexchange.com",
-  "superuser.com",
   "thingiverse.com",
   "time.is",
   "try.tp-link.com",

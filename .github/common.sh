@@ -95,10 +95,13 @@ merge_ip(){
 UA="Mozilla/5 (Linux; Android 11; Pixel 5) AppleWebKit/537 Chrome/107 Mobile Safari/537"
 test_ip(){
   set +e
-  TRACE_URL="$TRACE_HOST$TRACE_PATH"
-  OPENAI_HOST='android.chat.openai.com'; OPENAI_PATH='/public-api/mobile/server_status/v1'; 
-  OPENAI_URL="$OPENAI_HOST$OPENAI_PATH"
-  X_HOST='twitter.com'
+  #TRACE_URL="$TRACE_HOST$TRACE_PATH"
+  export TEMP_DIR="test_tmp"
+  export TARGET_HOST="cp.cloudflare.com"
+  export TARGET_URL="$TARGET_HOST/generate_204"
+  export OPENAI_HOST='android.chat.openai.com'; OPENAI_PATH='/public-api/mobile/server_status/v1'; 
+  export OPENAI_URL="$OPENAI_HOST$OPENAI_PATH"
+  export X_HOST='twitter.com'
   # ip port host path method?
   req_data(){
     local p=http; [ $2 -eq 443 ] && p=https
@@ -178,13 +181,12 @@ test_ip(){
         ;;
     esac
   }
-
+  
   probe_http(){
-    [ -z $1 ] && echo 'error: no ip' && return
     local ip=$1 port=$2 p=http
     [ -z "$2" ] && port=443
     [ $port -eq 443 ] && p=https
-    eval `curl -I --connect-timeout 5 -so /dev/null -w 'local code=%{http_code} time=%{time_connect}' --connect-to $TRACE_HOST:$port:$ip:$port $p://$TRACE_URL`
+    eval `curl -I --connect-timeout 3 -so /dev/null -w 'local code=%{http_code} time=%{time_connect}' --connect-to $TARGET_HOST:$port:$ip:$port $p://$TARGET_URL`
     
     if [ "$code" = 200 ]; then
       local ms=`echo "scale=0; $time*1000/1" | bc`
@@ -194,8 +196,24 @@ test_ip(){
       fi
     fi
   }
+  probe_cf(){
+    local ip=$1 port=443
+    eval `curl -I --connect-timeout 3 -so /dev/null -w 'local code=%{http_code} time=%{time_connect}' --connect-to $TARGET_HOST:$port:$ip:$port $TARGET_URL`
+    if [ "$code" = 204 ]; then
+      echo $ip:$port $time
+      echo $ip >> "$TEMP_DIR/443/$$"
+      if [ `ls "$TEMP_DIR/80" | wc -l` -lt 10 ]; then
+        port=80
+        eval `curl -I --connect-timeout 3 -so /dev/null -w 'local code=%{http_code} time=%{time_connect}' --connect-to $TARGET_HOST:$port:$ip:$port $TARGET_URL`
+        if [ "$code" = 204 ]; then
+          echo $ip:$port $time
+          touch "$TEMP_DIR/80/$ip"
+        fi
+      fi
+    fi
+  }
+  export -f probe_cf
   probe_openai(){
-    [ -z $1 ] && echo 'error: no ip' && return
     local ip=$1 port=443 p=https
     local r=`curl -A "UA" --connect-timeout 5 -s -w ' code=%{http_code}' --connect-to $OPENAI_HOST:$port:$ip:$port $p://$OPENAI_URL`
     eval `echo $r|sed -r 's/^.*(code=.*)$/local \1/'`
@@ -207,13 +225,33 @@ test_ip(){
     fi
   }
   probe_x(){
-    [ -z $1 ] && echo 'error: no ip' && return
     local ip=$1 port=443 p=https
     eval `curl -A "UA" --connect-timeout 5 -so /dev/null -w 'local code=%{http_code}' --connect-to $X_HOST:$port:$ip:$port $p://$X_HOST/`
     if [ "$code" = 301 ] || [ "$code" = 302 ] || [ "$code" = 200 ]; then
       echo $ip >> ipx.txt
     fi
   }
+  probe_others(){
+    local port=443 p=https
+    for ip in "$@"; do
+      # openai
+      local r=`curl -A "UA" --connect-timeout 5 -s -w ' code=%{http_code}' --connect-to $OPENAI_HOST:$port:$ip:$port $p://$OPENAI_URL`
+      eval `echo $r|sed -r 's/^.*(code=.*)$/local \1/'`
+      [ ! -z $code ] && [ $code != 000 ] && echo $ip:$port $r
+      if [ "$code" = 200 ]; then
+        echo $ip >> ipopenai.txt
+      elif [ $code != 400 ] || echo "$r"|grep 'html'; then
+        sed -i '/'$ip'/d' ip$port.txt
+      fi
+      # x
+      eval `curl -A "UA" --connect-timeout 5 -so /dev/null -w 'local code=%{http_code}' --connect-to $X_HOST:$port:$ip:$port $p://$X_HOST/`
+      if [ "$code" = 301 ] || [ "$code" = 302 ] || [ "$code" = 200 ]; then
+        echo $ip >> ipx.txt
+      fi
+      [ -s ipx.txt ] && [ `sed -n '$=' ipx.txt` -ge 300 ] && break;
+    done
+  }
+  export -f probe_others
 
   # while IFS= read -r ip; do
     # measure_http $ip 443
@@ -222,16 +260,23 @@ test_ip(){
     # measure_openai $ip
     # measure_http $ip 80
   # done < ip443.txt
-  while IFS= read -r ip; do
-    probe_http $ip 443
-  done < ip.txt
-  echo "databak={\"443\":[$(echo `sed -r 's/^(.*)$/"\1"/' ip443.txt`|tr -s ' ' ',')]}" >> $GITHUB_ENV;
-  while IFS= read -r ip; do
-    probe_http $ip 80
-    probe_openai $ip
-    probe_x $ip
-    [ `sed -n '$=' ipx.txt` -ge 300 ] && [ `sed -n '$=' ip80.txt` -ge 10 ] && break;
-  done < ip443.txt
+  # while IFS= read -r ip; do
+  #   probe_http $ip 443
+  # done < ip.txt
+  # while IFS= read -r ip; do
+  #   probe_http $ip 80
+  #   probe_openai $ip
+  #   probe_x $ip
+  #   [ `sed -n '$=' ipx.txt` -ge 300 ] && [ `sed -n '$=' ip80.txt` -ge 10 ] && break;
+  # done < ip443.txt
+
+  mkdir -p "$TEMP_DIR/443" "$TEMP_DIR/80"
+  cat ip.txt | xargs -P 50 -n 1 bash -c 'probe_cf "$@"' --
+  cat "$TEMP_DIR/443/"* > ip443.txt || exit 1
+  ls "$TEMP_DIR/80/" > ip80.txt
+  cat ip443.txt | xargs -P 50 -n 20 bash -c 'probe_others "$@"' --
+  # echo "databak={\"443\":[$(echo `sed -r 's/^(.*)$/"\1"/' ip443.txt`|tr -s ' ' ',')]}" >> $GITHUB_ENV
+  echo "{\"443\":[$(echo `sed -r 's/^(.*)$/"\1"/' ip443.txt`|tr -s ' ' ',')]}" > ip443.json
   echo `wc -l ip443.txt`| tee $GITHUB_STEP_SUMMARY
   echo `wc -l ip80.txt` | tee -a $GITHUB_STEP_SUMMARY
   echo `wc -l ipopenai.txt`| tee -a $GITHUB_STEP_SUMMARY
@@ -242,14 +287,14 @@ put_ip() {
   for i in 443 80 openai x; do
     [ ! -z $data ] && data=$data,
     if [ -s ip$i.txt ]; then
-      head -n 300 ip$i.txt > tmp && mv tmp ip$i.txt
+      head -n 300 ip$i.txt > tmp.txt && mv tmp.txt ip$i.txt
       data=$data\"$i\":[$(echo `sed -r 's/^(.*)$/"\1"/' ip$i.txt`|tr -s ' ' ',')]
     else
       data=$data\"$i\":[]
     fi
   done
   data={$data}
-  curl -X PUT -H "$AUTH" -d "$databak" "$CF_KV_API/$PROXYS_BAK"
+  curl -X PUT -H "$AUTH" -d "@ip443.json" "$CF_KV_API/$PROXYS_BAK"
   curl -X PUT -H "$AUTH" -d "$data" "$CF_KV_API/$PROXYS"
   curl -X PUT -H "$AUTH" -d `date '+%F %T %Z%z'` "$CF_KV_API/$PROXYS_UPDATED"
   # echo "data=$data" >> $GITHUB_OUTPUT
